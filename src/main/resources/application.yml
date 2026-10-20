@@ -12,7 +12,7 @@ spring:
             - id: usuarios-service
               uri: lb://USUARIOS-SERVICE
               predicates:
-                - Path=/usuarios/**
+                - Path=/usuarios/auth/**,/usuarios/users/me/**
               filters:
                 - StripPrefix=1
             - id: casos-service
@@ -31,4 +31,4 @@ spring:
 eureka:
   client:
     service-url:
-      defaultZone: http://localhost:8762/eureka/
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8762/eureka/}
