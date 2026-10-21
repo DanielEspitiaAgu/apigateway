@@ -33,12 +33,16 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     private static final String USER_ID_HEADER = "X-User-Id";
     private static final String ROLES_HEADER = "X-Roles";
+    private static final String GATEWAY_SECRET_HEADER = "X-Gateway-Secret";
+    private final String gatewaySecret;
 
     private final SecretKey key;
     private final List<PathPattern> publicPaths;
     private final List<PathPattern> blockedPaths;
 
-    public JwtAuthenticationGlobalFilter(@Value("${jwt.secret}") String secret) {
+    public JwtAuthenticationGlobalFilter(@Value("${jwt.secret}") String secret,
+            @Value("${gateway.secret:}") String gatewaySecret, String gatewaySecret2) {
+        this.gatewaySecret = gatewaySecret;
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
 
         PathPatternParser parser = PathPatternParser.defaultInstance;
@@ -49,7 +53,6 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
                 "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
                 .map(parser::parse).toList();
 
-        
         PathPatternParser insensitive = new PathPatternParser();
         insensitive.setCaseSensitive(false);
         this.blockedPaths = Stream.of("/usuarios/users/*/results/**")
@@ -58,7 +61,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE; 
+        return Ordered.HIGHEST_PRECEDENCE;
     }
 
     @Override
@@ -66,15 +69,17 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest request = exchange.getRequest();
         String path = normalize(request.getURI().getPath());
 
-        
         if (matches(blockedPaths, path)) {
             return reject(exchange, HttpStatus.FORBIDDEN, "Ruta de uso interno");
         }
 
-        
         ServerHttpRequest.Builder builder = request.mutate().headers(h -> {
             h.remove(USER_ID_HEADER);
             h.remove(ROLES_HEADER);
+            h.remove(GATEWAY_SECRET_HEADER);
+            if (!gatewaySecret.isBlank()) {
+                h.add(GATEWAY_SECRET_HEADER, gatewaySecret);
+            }
         });
 
         if (HttpMethod.OPTIONS.equals(request.getMethod()) || matches(publicPaths, path)) {
@@ -105,7 +110,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         }
 
         builder.header(USER_ID_HEADER, userId)
-               .header(ROLES_HEADER, roles.stream().map(String::valueOf).collect(Collectors.joining(",")));
+                .header(ROLES_HEADER, roles.stream().map(String::valueOf).collect(Collectors.joining(",")));
         return chain.filter(exchange.mutate().request(builder.build()).build());
     }
 
