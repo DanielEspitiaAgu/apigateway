@@ -1,10 +1,5 @@
 package co.edu.uptc.hopedoku.api_gateway.security;
 
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.Jws;
-import io.jsonwebtoken.JwtException;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
@@ -22,10 +17,8 @@ import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 import reactor.core.publisher.Mono;
 
-import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Component
@@ -34,20 +27,20 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
     private static final String USER_ID_HEADER = "X-User-Id";
     private static final String ROLES_HEADER = "X-Roles";
     private static final String GATEWAY_SECRET_HEADER = "X-Gateway-Secret";
-    private final String gatewaySecret;
 
-    private final SecretKey key;
+    private final String gatewaySecret;
+    private final KeycloakTokenValidator tokenValidator;
     private final List<PathPattern> publicPaths;
     private final List<PathPattern> blockedPaths;
 
-    public JwtAuthenticationGlobalFilter(@Value("${jwt.secret}") String secret,
+    public JwtAuthenticationGlobalFilter(
+            KeycloakTokenValidator tokenValidator,
             @Value("${gateway.secret:}") String gatewaySecret) {
         this.gatewaySecret = gatewaySecret;
-        this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        this.tokenValidator = tokenValidator;
 
         PathPatternParser parser = PathPatternParser.defaultInstance;
         this.publicPaths = Stream.of(
-                "/usuarios/auth/**",
                 "/usuarios/swagger-ui/**", "/usuarios/swagger-ui.html", "/usuarios/v3/api-docs/**",
                 "/casos/docs/**", "/casos/docs-json",
                 "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
@@ -69,16 +62,16 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest request = exchange.getRequest();
         String path = normalize(request.getURI().getPath());
 
-        if (matches(blockedPaths, path)) {
-            return reject(exchange, HttpStatus.FORBIDDEN, "Ruta de uso interno");
+        if (HttpMethod.POST.equals(request.getMethod()) && matches(blockedPaths, path)) {
+            return reject(exchange, HttpStatus.FORBIDDEN, "forbidden", "Ruta de uso interno");
         }
 
-        ServerHttpRequest.Builder builder = request.mutate().headers(h -> {
-            h.remove(USER_ID_HEADER);
-            h.remove(ROLES_HEADER);
-            h.remove(GATEWAY_SECRET_HEADER);
+        ServerHttpRequest.Builder builder = request.mutate().headers(headers -> {
+            headers.remove(USER_ID_HEADER);
+            headers.remove(ROLES_HEADER);
+            headers.remove(GATEWAY_SECRET_HEADER);
             if (!gatewaySecret.isBlank()) {
-                h.add(GATEWAY_SECRET_HEADER, gatewaySecret);
+                headers.add(GATEWAY_SECRET_HEADER, gatewaySecret);
             }
         });
 
@@ -87,31 +80,22 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         }
 
         String authorization = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
-        if (authorization == null || !authorization.startsWith("Bearer ")) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token ausente");
+        if (authorization == null || !authorization.startsWith("Bearer ")
+                || authorization.substring(7).isBlank()) {
+            return rejectUnauthorized(exchange, "Falta un bearer token válido");
         }
 
-        Claims claims;
-        try {
-            Jws<Claims> jws = Jwts.parser().verifyWith(key).build()
-                    .parseSignedClaims(authorization.substring(7));
-            if (!"HS256".equals(jws.getHeader().getAlgorithm())) {
-                return reject(exchange, HttpStatus.UNAUTHORIZED, "Algoritmo no permitido");
-            }
-            claims = jws.getPayload();
-        } catch (JwtException | IllegalArgumentException e) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token inválido o vencido");
-        }
-
-        String userId = claims.get("userId", String.class);
-        List<?> roles = claims.get("roles", List.class);
-        if (userId == null || roles == null) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token sin identidad: inicie sesión de nuevo");
-        }
-
-        builder.header(USER_ID_HEADER, userId)
-                .header(ROLES_HEADER, roles.stream().map(String::valueOf).collect(Collectors.joining(",")));
-        return chain.filter(exchange.mutate().request(builder.build()).build());
+        return tokenValidator.validate(authorization.substring(7).trim())
+                .flatMap(identity -> {
+                    builder.header(USER_ID_HEADER, identity.subject())
+                            .header(ROLES_HEADER, identity.rolesHeader());
+                    return chain.filter(exchange.mutate().request(builder.build()).build());
+                })
+                .onErrorResume(JwksUnavailableException.class,
+                        error -> reject(exchange, HttpStatus.SERVICE_UNAVAILABLE,
+                                "service_unavailable", "No se pudo obtener las claves de autenticación"))
+                .onErrorResume(InvalidKeycloakTokenException.class,
+                        error -> rejectUnauthorized(exchange, "Token inválido o no autorizado"));
     }
 
     private static String normalize(String path) {
@@ -120,17 +104,21 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     private static boolean matches(List<PathPattern> patterns, String path) {
         PathContainer container = PathContainer.parsePath(path);
-        return patterns.stream().anyMatch(p -> p.matches(container));
+        return patterns.stream().anyMatch(pattern -> pattern.matches(container));
     }
 
-    private Mono<Void> reject(ServerWebExchange exchange, HttpStatus status, String message) {
+    private Mono<Void> rejectUnauthorized(ServerWebExchange exchange, String message) {
+        exchange.getResponse().getHeaders().set(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
+        return reject(exchange, HttpStatus.UNAUTHORIZED, "unauthorized", message);
+    }
+
+    private Mono<Void> reject(ServerWebExchange exchange, HttpStatus status, String error, String message) {
         var response = exchange.getResponse();
         response.setStatusCode(status);
         response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-        if (status == HttpStatus.UNAUTHORIZED) {
-            response.getHeaders().set(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
-        }
-        byte[] body = ("{\"status\":" + status.value() + ",\"error\":\"" + message + "\"}")
+        byte[] body = ("{\"status\":" + status.value()
+                + ",\"error\":\"" + error
+                + "\",\"message\":\"" + message + "\"}")
                 .getBytes(StandardCharsets.UTF_8);
         return response.writeWith(Mono.just(response.bufferFactory().wrap(body)));
     }

@@ -31,11 +31,13 @@ spring:
               filters:
                 - StripPrefix=1
 
-jwt:
-  secret: ${JWT_SECRET:ClaveSuperSecretaParaDesarrolloCambiarEnProduccion123456}
-
 gateway:
   secret: ${GATEWAY_SECRET:}
+
+keycloak:
+  issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8180/realms/hopedoku}
+  jwks-uri: ${KEYCLOAK_JWKS_URI:http://keycloak:8080/realms/hopedoku/protocol/openid-connect/certs}
+  authorized-party: ${KEYCLOAK_AUTHORIZED_PARTY:hopedoku-godot}
 
 eureka:
   instance:
