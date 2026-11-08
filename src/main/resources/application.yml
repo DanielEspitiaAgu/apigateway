@@ -37,7 +37,7 @@ gateway:
 keycloak:
   issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8180/realms/hopedoku}
   jwks-uri: ${KEYCLOAK_JWKS_URI:http://keycloak:8080/realms/hopedoku/protocol/openid-connect/certs}
-  authorized-party: ${KEYCLOAK_AUTHORIZED_PARTY:hopedoku-godot}
+  allowed-azp: ${KEYCLOAK_ALLOWED_AZP:${KEYCLOAK_AUTHORIZED_PARTY:hopedoku-godot}}
 
 eureka:
   instance:

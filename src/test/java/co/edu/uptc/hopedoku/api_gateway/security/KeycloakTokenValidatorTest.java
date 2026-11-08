@@ -44,6 +44,7 @@ class KeycloakTokenValidatorTest {
 
     private RSAKey rsaKey;
     private NimbusJwtEncoder encoder;
+    private NimbusReactiveJwtDecoder decoder;
     private KeycloakTokenValidator validator;
 
     @BeforeEach
@@ -51,7 +52,7 @@ class KeycloakTokenValidatorTest {
         rsaKey = new RSAKeyGenerator(2048).keyID("test-key").generate();
         encoder = new NimbusJwtEncoder(new ImmutableJWKSet<SecurityContext>(new JWKSet(rsaKey)));
 
-        NimbusReactiveJwtDecoder decoder = NimbusReactiveJwtDecoder.withPublicKey(rsaKey.toRSAPublicKey()).build();
+        decoder = NimbusReactiveJwtDecoder.withPublicKey(rsaKey.toRSAPublicKey()).build();
         OAuth2TokenValidator<Jwt> requiredExpiration = jwt -> jwt.getExpiresAt() != null
                 ? OAuth2TokenValidatorResult.success()
                 : OAuth2TokenValidatorResult.failure(new OAuth2Error("invalid_token", "Missing exp claim", null));
@@ -114,6 +115,51 @@ class KeycloakTokenValidatorTest {
     }
 
     @Test
+    void acceptsAnyAuthorizedPartyFromCommaSeparatedList() {
+        KeycloakTokenValidator multiValidator = new KeycloakTokenValidator(decoder, "hopedoku-godot,hopedoku-test");
+
+        AuthenticatedIdentity godot = multiValidator.validate(token(
+                ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", "hopedoku-godot", List.of("USER"))).block();
+        AuthenticatedIdentity test = multiValidator.validate(token(
+                ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", "hopedoku-test", List.of("USER"))).block();
+
+        assertEquals(SUBJECT, godot.subject());
+        assertEquals(SUBJECT, test.subject());
+    }
+
+    @Test
+    void acceptsCommaSeparatedListWithSpaces() {
+        KeycloakTokenValidator multiValidator = new KeycloakTokenValidator(decoder, " hopedoku-godot , hopedoku-test ");
+
+        AuthenticatedIdentity identity = multiValidator.validate(token(
+                ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", "hopedoku-test", List.of("USER"))).block();
+
+        assertEquals(SUBJECT, identity.subject());
+    }
+
+    @Test
+    void rejectsAuthorizedPartyNotInList() {
+        KeycloakTokenValidator multiValidator = new KeycloakTokenValidator(decoder, "hopedoku-godot,hopedoku-test");
+
+        String token = token(ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", "another-client", List.of("USER"));
+
+        assertThrows(RuntimeException.class, () -> multiValidator.validate(token).block());
+    }
+
+    @Test
+    void rejectsMissingAuthorizedParty() {
+        assertInvalid(token(ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", null, List.of("USER")));
+    }
+
+    @Test
+    void rejectsEveryTokenWhenAllowedListIsBlank() {
+        KeycloakTokenValidator emptyValidator = new KeycloakTokenValidator(decoder, "   ,  ");
+        String token = token(ISSUER, Instant.now().plusSeconds(60), SUBJECT, "Bearer", CLIENT_ID, List.of("USER"));
+
+        assertThrows(RuntimeException.class, () -> emptyValidator.validate(token).block());
+    }
+
+    @Test
     void rejectsHs256TokenSignedWithArbitrarySecret() throws Exception {
         Instant now = Instant.now();
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
@@ -142,8 +188,10 @@ class KeycloakTokenValidatorTest {
                 .issuer(issuer)
                 .issuedAt(issuedAt)
                 .expiresAt(expiresAt)
-                .claim("typ", typ)
-                .claim("azp", authorizedParty);
+                .claim("typ", typ);
+        if (authorizedParty != null) {
+            claims.claim("azp", authorizedParty);
+        }
         if (subject != null) {
             claims.subject(subject);
         }

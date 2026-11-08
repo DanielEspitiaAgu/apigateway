@@ -14,11 +14,13 @@ import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 @Component
 public class KeycloakTokenValidator {
@@ -26,13 +28,16 @@ public class KeycloakTokenValidator {
     private static final Set<String> ALLOWED_ROLES = Set.of("USER", "ADMIN");
 
     private final ReactiveJwtDecoder decoder;
-    private final String authorizedParty;
+    private final Set<String> allowedAuthorizedParties;
 
     public KeycloakTokenValidator(
             ReactiveJwtDecoder decoder,
-            @Value("${keycloak.authorized-party}") String authorizedParty) {
+            @Value("${keycloak.allowed-azp:hopedoku-godot}") String allowedAuthorizedParties) {
         this.decoder = decoder;
-        this.authorizedParty = authorizedParty;
+        this.allowedAuthorizedParties = Arrays.stream(allowedAuthorizedParties.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     public Mono<AuthenticatedIdentity> validate(String token) {
@@ -72,8 +77,10 @@ public class KeycloakTokenValidator {
     }
 
     private AuthenticatedIdentity extractIdentity(Jwt jwt) {
+        String authorizedParty = jwt.getClaimAsString("azp");
         if (!"Bearer".equals(jwt.getClaimAsString("typ"))
-                || !authorizedParty.equals(jwt.getClaimAsString("azp"))
+                || authorizedParty == null
+                || !allowedAuthorizedParties.contains(authorizedParty)
                 || jwt.getSubject() == null || jwt.getSubject().isBlank()) {
             throw new InvalidKeycloakTokenException();
         }
