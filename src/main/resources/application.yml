@@ -5,15 +5,17 @@ spring:
   application:
     name: api-gateway
   cloud:
+    loadbalancer:
+      cache:
+        ttl: ${LOADBALANCER_CACHE_TTL:35s}
     gateway:
-      secret: ${GATEWAY_SECRET:}
       server:
         webflux:
           routes:
             - id: usuarios-service
               uri: lb://USUARIOS-SERVICE
               predicates:
-                - Path=/usuarios/auth/**,/usuarios/users/me/**
+                - Path=/usuarios/**
               filters:
                 - StripPrefix=1
             - id: casos-service
@@ -32,7 +34,14 @@ spring:
 jwt:
   secret: ${JWT_SECRET:ClaveSuperSecretaParaDesarrolloCambiarEnProduccion123456}
 
+gateway:
+  secret: ${GATEWAY_SECRET:}
+
 eureka:
+  instance:
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:api-gateway}
+    lease-renewal-interval-in-seconds: ${EUREKA_LEASE_RENEWAL_INTERVAL_SECONDS:30}
   client:
+    registry-fetch-interval-seconds: ${EUREKA_REGISTRY_FETCH_INTERVAL_SECONDS:30}
     service-url:
-      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8762/eureka/}
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8762/eureka/}

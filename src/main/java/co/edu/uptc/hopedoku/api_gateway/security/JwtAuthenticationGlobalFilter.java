@@ -41,7 +41,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
     private final List<PathPattern> blockedPaths;
 
     public JwtAuthenticationGlobalFilter(@Value("${jwt.secret}") String secret,
-            @Value("${gateway.secret:}") String gatewaySecret, String gatewaySecret2) {
+            @Value("${gateway.secret:}") String gatewaySecret) {
         this.gatewaySecret = gatewaySecret;
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
 
