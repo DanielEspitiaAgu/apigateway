@@ -1,0 +1,108 @@
+package co.edu.uptc.hopedoku.api_gateway.security;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
+import reactor.core.publisher.Mono;
+
+import java.io.IOException;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
+
+@Component
+public class KeycloakTokenValidator {
+
+    private static final Set<String> ALLOWED_ROLES = Set.of("USER", "ADMIN");
+
+    private final ReactiveJwtDecoder decoder;
+    private final Set<String> allowedAuthorizedParties;
+
+    public KeycloakTokenValidator(
+            ReactiveJwtDecoder decoder,
+            @Value("${keycloak.allowed-azp:hopedoku-godot}") String allowedAuthorizedParties) {
+        this.decoder = decoder;
+        this.allowedAuthorizedParties = Arrays.stream(allowedAuthorizedParties.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    public Mono<AuthenticatedIdentity> validate(String token) {
+        return decoder.decode(token)
+                .onErrorMap(this::mapDecoderFailure)
+                .map(this::extractIdentity);
+    }
+
+    private RuntimeException mapDecoderFailure(Throwable error) {
+        if (isJwksUnavailable(error)) {
+            return new JwksUnavailableException(error);
+        }
+        return error instanceof InvalidKeycloakTokenException
+                ? (InvalidKeycloakTokenException) error
+                : new InvalidKeycloakTokenException(error);
+    }
+
+    private static boolean isJwksUnavailable(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof WebClientRequestException
+                    || current instanceof ConnectException
+                    || current instanceof SocketTimeoutException
+                    || current instanceof UnknownHostException
+                    || current instanceof TimeoutException
+                    || current instanceof IOException
+                    || current.getClass().getName().contains("RemoteKeySourceException")) {
+                return true;
+            }
+            if (current instanceof WebClientResponseException response
+                    && response.getStatusCode().is5xxServerError()) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private AuthenticatedIdentity extractIdentity(Jwt jwt) {
+        String authorizedParty = jwt.getClaimAsString("azp");
+        if (!"Bearer".equals(jwt.getClaimAsString("typ"))
+                || authorizedParty == null
+                || !allowedAuthorizedParties.contains(authorizedParty)
+                || jwt.getSubject() == null || jwt.getSubject().isBlank()) {
+            throw new InvalidKeycloakTokenException();
+        }
+
+        Object realmAccessClaim = jwt.getClaims().get("realm_access");
+        if (!(realmAccessClaim instanceof Map<?, ?> realmAccess)) {
+            throw new InvalidKeycloakTokenException();
+        }
+        Object rolesClaim = realmAccess.get("roles");
+        if (!(rolesClaim instanceof Collection<?> roleValues)) {
+            throw new InvalidKeycloakTokenException();
+        }
+
+        List<String> roles = new ArrayList<>();
+        for (Object role : roleValues) {
+            if (role instanceof String roleName && ALLOWED_ROLES.contains(roleName) && !roles.contains(roleName)) {
+                roles.add(roleName);
+            }
+        }
+        if (roles.isEmpty()) {
+            throw new InvalidKeycloakTokenException();
+        }
+        return new AuthenticatedIdentity(jwt.getSubject(), roles);
+    }
+}
