@@ -48,7 +48,10 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
         PathPatternParser insensitive = new PathPatternParser();
         insensitive.setCaseSensitive(false);
-        this.blockedPaths = Stream.of("/usuarios/users/*/results/**")
+        this.blockedPaths = Stream.of(
+                "/usuarios/users/*/results/**",
+                "/casos/cases/*/validate",
+                "/casos/cases/*/validate/**")
                 .map(insensitive::parse).toList();
     }
 
