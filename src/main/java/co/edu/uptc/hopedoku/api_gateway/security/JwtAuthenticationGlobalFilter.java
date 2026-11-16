@@ -1,10 +1,5 @@
 package co.edu.uptc.hopedoku.api_gateway.security;
 
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.Jws;
-import io.jsonwebtoken.JwtException;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
@@ -15,6 +10,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.PathContainer;
 import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.server.ServerWebExchange;
@@ -22,10 +20,13 @@ import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 import reactor.core.publisher.Mono;
 
-import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 @Component
@@ -33,32 +34,42 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     private static final String USER_ID_HEADER = "X-User-Id";
     private static final String ROLES_HEADER = "X-Roles";
+    private static final String GATEWAY_SECRET_HEADER = "X-Gateway-Secret";
+    private static final Pattern USER_ID_PATTERN = Pattern.compile("[A-Za-z0-9-]{1,64}");
+    private static final Set<String> PLAYER_ROLES = Set.of("USER", "ADMIN");
 
-    private final SecretKey key;
+    private final ReactiveJwtDecoder jwtDecoder;
+    private final String gatewaySecret;
     private final List<PathPattern> publicPaths;
-    private final List<PathPattern> blockedPaths;
+    private final List<PathPattern> internalPaths;
+    private final List<PathPattern> adminPaths;
 
-    public JwtAuthenticationGlobalFilter(@Value("${jwt.secret}") String secret) {
-        this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+    public JwtAuthenticationGlobalFilter(
+            ReactiveJwtDecoder jwtDecoder,
+            @Value("${gateway.secret}") String gatewaySecret) {
+        if (!StringUtils.hasText(gatewaySecret)) {
+            throw new IllegalStateException("GATEWAY_SECRET debe estar configurado");
+        }
+        this.jwtDecoder = jwtDecoder;
+        this.gatewaySecret = gatewaySecret;
 
         PathPatternParser parser = PathPatternParser.defaultInstance;
         this.publicPaths = Stream.of(
-                "/usuarios/auth/**",
+                "/usuarios/health",
                 "/usuarios/swagger-ui/**", "/usuarios/swagger-ui.html", "/usuarios/v3/api-docs/**",
-                "/casos/docs/**", "/casos/docs-json",
-                "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
+                "/casos/health", "/casos/docs/**", "/casos/docs-json",
+                "/partidas/health", "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
                 .map(parser::parse).toList();
-
-        
-        PathPatternParser insensitive = new PathPatternParser();
-        insensitive.setCaseSensitive(false);
-        this.blockedPaths = Stream.of("/usuarios/users/*/results/**")
-                .map(insensitive::parse).toList();
+        this.internalPaths = Stream.of(
+                "/usuarios/users/*/results/**",
+                "/casos/cases/*/validate")
+                .map(parser::parse).toList();
+        this.adminPaths = List.of(parser.parse("/casos/admin/cases/**"));
     }
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE; 
+        return Ordered.HIGHEST_PRECEDENCE;
     }
 
     @Override
@@ -66,47 +77,83 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest request = exchange.getRequest();
         String path = normalize(request.getURI().getPath());
 
-        
-        if (matches(blockedPaths, path)) {
+        if (matches(internalPaths, path)) {
             return reject(exchange, HttpStatus.FORBIDDEN, "Ruta de uso interno");
         }
 
-        
-        ServerHttpRequest.Builder builder = request.mutate().headers(h -> {
-            h.remove(USER_ID_HEADER);
-            h.remove(ROLES_HEADER);
+        ServerHttpRequest.Builder builder = request.mutate().headers(headers -> {
+            headers.remove(USER_ID_HEADER);
+            headers.remove(ROLES_HEADER);
+            headers.remove(GATEWAY_SECRET_HEADER);
+            headers.remove("X-Internal-Token");
+            headers.remove(HttpHeaders.AUTHORIZATION);
+            headers.set(GATEWAY_SECRET_HEADER, gatewaySecret);
         });
 
-        if (HttpMethod.OPTIONS.equals(request.getMethod()) || matches(publicPaths, path)) {
+        if (HttpMethod.OPTIONS.equals(request.getMethod())
+                || (HttpMethod.GET.equals(request.getMethod()) && matches(publicPaths, path))) {
             return chain.filter(exchange.mutate().request(builder.build()).build());
         }
 
-        String authorization = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
-        if (authorization == null || !authorization.startsWith("Bearer ")) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token ausente");
+        String token = bearerToken(request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION));
+        if (token == null) {
+            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token ausente o inválido");
         }
 
-        Claims claims;
-        try {
-            Jws<Claims> jws = Jwts.parser().verifyWith(key).build()
-                    .parseSignedClaims(authorization.substring(7));
-            if (!"HS256".equals(jws.getHeader().getAlgorithm())) {
-                return reject(exchange, HttpStatus.UNAUTHORIZED, "Algoritmo no permitido");
-            }
-            claims = jws.getPayload();
-        } catch (JwtException | IllegalArgumentException e) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token inválido o vencido");
-        }
+        return jwtDecoder.decode(token)
+                .flatMap(jwt -> authorize(exchange, chain, builder, path, jwt))
+                .onErrorResume(JwtException.class,
+                        error -> reject(exchange, HttpStatus.UNAUTHORIZED, "Token inválido o vencido"));
+    }
 
-        String userId = claims.get("userId", String.class);
-        List<?> roles = claims.get("roles", List.class);
-        if (userId == null || roles == null) {
-            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token sin identidad: inicie sesión de nuevo");
+    private Mono<Void> authorize(
+            ServerWebExchange exchange,
+            GatewayFilterChain chain,
+            ServerHttpRequest.Builder builder,
+            String path,
+            Jwt jwt) {
+        String userId = jwt.getSubject();
+        Set<String> roles = userRoles(jwt);
+        if (userId == null || !USER_ID_PATTERN.matcher(userId).matches()) {
+            return reject(exchange, HttpStatus.UNAUTHORIZED, "Token sin identidad válida");
+        }
+        if (roles.isEmpty()) {
+            return reject(exchange, HttpStatus.FORBIDDEN, "Se requiere rol USER o ADMIN");
+        }
+        if (matches(adminPaths, path) && !roles.contains("ADMIN")) {
+            return reject(exchange, HttpStatus.FORBIDDEN, "Se requiere rol ADMIN");
         }
 
         builder.header(USER_ID_HEADER, userId)
-               .header(ROLES_HEADER, roles.stream().map(String::valueOf).collect(Collectors.joining(",")));
+                .header(ROLES_HEADER, String.join(",", roles));
         return chain.filter(exchange.mutate().request(builder.build()).build());
+    }
+
+    private static Set<String> userRoles(Jwt jwt) {
+        Object realmAccessClaim = jwt.getClaims().get("realm_access");
+        if (!(realmAccessClaim instanceof Map<?, ?> realmAccess)) {
+            return Set.of();
+        }
+        Object rolesClaim = realmAccess.get("roles");
+        if (!(rolesClaim instanceof Collection<?> claims)) {
+            return Set.of();
+        }
+        Set<String> roles = new TreeSet<>();
+        claims.stream()
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
+                .filter(PLAYER_ROLES::contains)
+                .forEach(roles::add);
+        return roles;
+    }
+
+    private static String bearerToken(String authorization) {
+        if (authorization == null || authorization.length() <= 7
+                || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            return null;
+        }
+        String token = authorization.substring(7).trim();
+        return StringUtils.hasText(token) ? token : null;
     }
 
     private static String normalize(String path) {
@@ -115,7 +162,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     private static boolean matches(List<PathPattern> patterns, String path) {
         PathContainer container = PathContainer.parsePath(path);
-        return patterns.stream().anyMatch(p -> p.matches(container));
+        return patterns.stream().anyMatch(pattern -> pattern.matches(container));
     }
 
     private Mono<Void> reject(ServerWebExchange exchange, HttpStatus status, String message) {

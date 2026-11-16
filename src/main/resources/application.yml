@@ -12,7 +12,7 @@ spring:
             - id: usuarios-service
               uri: lb://USUARIOS-SERVICE
               predicates:
-                - Path=/usuarios/auth/**,/usuarios/users/me/**
+                - Path=/usuarios/health,/usuarios/swagger-ui/**,/usuarios/swagger-ui.html,/usuarios/v3/api-docs/**,/usuarios/users/me/**
               filters:
                 - StripPrefix=1
             - id: casos-service
@@ -28,10 +28,19 @@ spring:
               filters:
                 - StripPrefix=1
 
-jwt:
-  secret: ${JWT_SECRET:ClaveSuperSecretaParaDesarrolloCambiarEnProduccion123456}
+gateway:
+  secret: ${GATEWAY_SECRET}
+
+keycloak:
+  issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8180/realms/hopedoku}
+  jwks-uri: ${KEYCLOAK_JWKS_URI:http://keycloak:8080/realms/hopedoku/protocol/openid-connect/certs}
+  audience: ${KEYCLOAK_AUDIENCE:hopedoku-gateway}
+  allowed-azp: ${KEYCLOAK_ALLOWED_AZP:hopedoku-godot}
 
 eureka:
   client:
     service-url:
-      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8762/eureka/}
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8762/eureka/}
+  instance:
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+    prefer-ip-address: false
