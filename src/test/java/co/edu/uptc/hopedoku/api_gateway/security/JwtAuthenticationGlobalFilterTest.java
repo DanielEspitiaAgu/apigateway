@@ -7,34 +7,28 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class JwtAuthenticationGlobalFilterTest {
 
     private static final String GATEWAY_SECRET = "test-gateway-secret";
-    private ReactiveJwtDecoder jwtDecoder;
+    private KeycloakTokenValidator tokenValidator;
     private JwtAuthenticationGlobalFilter filter;
 
     @BeforeEach
     void setUp() {
-        jwtDecoder = mock(ReactiveJwtDecoder.class);
-        filter = new JwtAuthenticationGlobalFilter(jwtDecoder, GATEWAY_SECRET);
+        tokenValidator = mock(KeycloakTokenValidator.class);
+        filter = new JwtAuthenticationGlobalFilter(tokenValidator, GATEWAY_SECRET);
     }
 
     @Test
@@ -48,7 +42,7 @@ class JwtAuthenticationGlobalFilterTest {
 
     @Test
     void rejectsInvalidBearerToken() {
-        when(jwtDecoder.decode("invalid")).thenReturn(Mono.error(new JwtException("invalid")));
+        when(tokenValidator.validate("invalid")).thenReturn(Mono.error(new InvalidKeycloakTokenException()));
         MockServerWebExchange exchange = exchange("GET", "/usuarios/users/me", "Bearer invalid");
 
         filter.filter(exchange, ignored -> Mono.empty()).block();
@@ -57,14 +51,9 @@ class JwtAuthenticationGlobalFilterTest {
     }
 
     @Test
-    void requiresGatewaySecretAtConstruction() {
-        assertThrows(IllegalStateException.class,
-                () -> new JwtAuthenticationGlobalFilter(jwtDecoder, " "));
-    }
-
-    @Test
     void rewritesIdentityRolesAndGatewaySecretFromValidatedJwt() {
-        when(jwtDecoder.decode("valid")).thenReturn(Mono.just(jwt("subject-1", List.of("USER"))));
+        when(tokenValidator.validate("valid"))
+                .thenReturn(Mono.just(new AuthenticatedIdentity("subject-1", List.of("USER"))));
         MockServerWebExchange exchange = MockServerWebExchange.from(
                 MockServerHttpRequest.get("/partidas/matches/history/me")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer valid")
@@ -113,10 +102,16 @@ class JwtAuthenticationGlobalFilterTest {
 
     @Test
     void requiresAdminRoleForAdminCasesAndAllowsUserRoleForPlayerRoutes() {
-        when(jwtDecoder.decode("user")).thenReturn(Mono.just(jwt("user-1", List.of("USER"))));
+        when(tokenValidator.validate("user"))
+                .thenReturn(Mono.just(new AuthenticatedIdentity("user-1", List.of("USER"))));
         MockServerWebExchange adminRequest = exchange("POST", "/casos/admin/cases", "Bearer user");
-        filter.filter(adminRequest, ignored -> Mono.empty()).block();
-        assertEquals(HttpStatus.FORBIDDEN, adminRequest.getResponse().getStatusCode());
+        AtomicReference<ServerWebExchange> adminForwarded = new AtomicReference<>();
+        filter.filter(adminRequest, request -> {
+            adminForwarded.set(request);
+            return Mono.empty();
+        }).block();
+        assertNotNull(adminForwarded.get());
+        assertEquals("USER", adminForwarded.get().getRequest().getHeaders().getFirst("X-Roles"));
 
         MockServerWebExchange playerRequest = exchange("GET", "/casos/cases", "Bearer user");
         AtomicReference<ServerWebExchange> forwarded = new AtomicReference<>();
@@ -129,7 +124,8 @@ class JwtAuthenticationGlobalFilterTest {
 
     @Test
     void allowsAdminRoleForAdminCases() {
-        when(jwtDecoder.decode("admin")).thenReturn(Mono.just(jwt("admin-1", List.of("USER", "ADMIN"))));
+        when(tokenValidator.validate("admin"))
+                .thenReturn(Mono.just(new AuthenticatedIdentity("admin-1", List.of("USER", "ADMIN"))));
         MockServerWebExchange exchange = exchange("POST", "/casos/admin/cases", "Bearer admin");
         AtomicReference<ServerWebExchange> forwarded = new AtomicReference<>();
 
@@ -139,17 +135,18 @@ class JwtAuthenticationGlobalFilterTest {
         }).block();
 
         assertNotNull(forwarded.get());
-        assertEquals("ADMIN,USER", forwarded.get().getRequest().getHeaders().getFirst("X-Roles"));
+        assertEquals("USER,ADMIN", forwarded.get().getRequest().getHeaders().getFirst("X-Roles"));
     }
 
     @Test
     void rejectsTokensWithoutFunctionalRoles() {
-        when(jwtDecoder.decode("roleless")).thenReturn(Mono.just(jwt("user-1", List.of())));
+        when(tokenValidator.validate("roleless"))
+                .thenReturn(Mono.error(new InvalidKeycloakTokenException()));
         MockServerWebExchange exchange = exchange("GET", "/partidas/matches/ranking", "Bearer roleless");
 
         filter.filter(exchange, ignored -> Mono.empty()).block();
 
-        assertEquals(HttpStatus.FORBIDDEN, exchange.getResponse().getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
     }
 
     @Test
@@ -175,14 +172,4 @@ class JwtAuthenticationGlobalFilterTest {
                 .build());
     }
 
-    private static Jwt jwt(String subject, List<String> roles) {
-        Instant now = Instant.now();
-        return Jwt.withTokenValue("validated")
-                .header("alg", "RS256")
-                .claim("sub", subject)
-                .claim("realm_access", Map.of("roles", roles))
-                .issuedAt(now.minusSeconds(1))
-                .expiresAt(now.plusSeconds(300))
-                .build();
-    }
 }

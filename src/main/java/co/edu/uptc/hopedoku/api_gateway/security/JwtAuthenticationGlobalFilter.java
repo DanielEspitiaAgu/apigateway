@@ -10,9 +10,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.PathContainer;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.server.ServerWebExchange;
@@ -21,7 +18,6 @@ import org.springframework.web.util.pattern.PathPatternParser;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Collection;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -35,8 +31,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
     private final String gatewaySecret;
     private final KeycloakTokenValidator tokenValidator;
     private final List<PathPattern> publicPaths;
-    private final List<PathPattern> internalPaths;
-    private final List<PathPattern> adminPaths;
+    private final List<PathPattern> blockedPaths;
 
     public JwtAuthenticationGlobalFilter(
             KeycloakTokenValidator tokenValidator,
@@ -49,10 +44,6 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
                 "/usuarios/swagger-ui/**", "/usuarios/swagger-ui.html", "/usuarios/v3/api-docs/**",
                 "/casos/health", "/casos/docs/**", "/casos/docs-json",
                 "/partidas/health", "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
-                .map(parser::parse).toList();
-        this.internalPaths = Stream.of(
-                "/usuarios/users/*/results/**",
-                "/casos/cases/*/validate")
                 .map(parser::parse).toList();
 
         PathPatternParser insensitive = new PathPatternParser();
@@ -82,6 +73,8 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
             headers.remove(USER_ID_HEADER);
             headers.remove(ROLES_HEADER);
             headers.remove(GATEWAY_SECRET_HEADER);
+            headers.remove("X-Internal-Token");
+            headers.remove(HttpHeaders.AUTHORIZATION);
             if (!gatewaySecret.isBlank()) {
                 headers.add(GATEWAY_SECRET_HEADER, gatewaySecret);
             }
@@ -109,33 +102,6 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
                                 "service_unavailable", "No se pudo obtener las claves de autenticación"))
                 .onErrorResume(InvalidKeycloakTokenException.class,
                         error -> rejectUnauthorized(exchange, "Token inválido o no autorizado"));
-    }
-
-    private static Set<String> userRoles(Jwt jwt) {
-        Object realmAccessClaim = jwt.getClaims().get("realm_access");
-        if (!(realmAccessClaim instanceof Map<?, ?> realmAccess)) {
-            return Set.of();
-        }
-        Object rolesClaim = realmAccess.get("roles");
-        if (!(rolesClaim instanceof Collection<?> claims)) {
-            return Set.of();
-        }
-        Set<String> roles = new TreeSet<>();
-        claims.stream()
-                .filter(String.class::isInstance)
-                .map(String.class::cast)
-                .filter(PLAYER_ROLES::contains)
-                .forEach(roles::add);
-        return roles;
-    }
-
-    private static String bearerToken(String authorization) {
-        if (authorization == null || authorization.length() <= 7
-                || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
-            return null;
-        }
-        String token = authorization.substring(7).trim();
-        return StringUtils.hasText(token) ? token : null;
     }
 
     private static String normalize(String path) {
