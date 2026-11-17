@@ -66,7 +66,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
         String path = normalize(request.getURI().getPath());
 
         if (HttpMethod.POST.equals(request.getMethod()) && matches(blockedPaths, path)) {
-            return reject(exchange, HttpStatus.FORBIDDEN, "forbidden", "Ruta de uso interno");
+            return reject(exchange, HttpStatus.FORBIDDEN, "FORBIDDEN", "Ruta de uso interno");
         }
 
         ServerHttpRequest.Builder builder = request.mutate().headers(headers -> {
@@ -99,7 +99,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
                 })
                 .onErrorResume(JwksUnavailableException.class,
                         error -> reject(exchange, HttpStatus.SERVICE_UNAVAILABLE,
-                                "service_unavailable", "No se pudo obtener las claves de autenticación"))
+                                "UPSTREAM_UNAVAILABLE", "No se pudo obtener las claves de autenticación"))
                 .onErrorResume(InvalidKeycloakTokenException.class,
                         error -> rejectUnauthorized(exchange, "Token inválido o no autorizado"));
     }
@@ -115,7 +115,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
     private Mono<Void> rejectUnauthorized(ServerWebExchange exchange, String message) {
         exchange.getResponse().getHeaders().set(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
-        return reject(exchange, HttpStatus.UNAUTHORIZED, "unauthorized", message);
+        return reject(exchange, HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", message);
     }
 
     private Mono<Void> reject(ServerWebExchange exchange, HttpStatus status, String error, String message) {

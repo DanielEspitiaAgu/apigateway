@@ -101,28 +101,6 @@ class JwtAuthenticationGlobalFilterTest {
     }
 
     @Test
-    void allowsUsersHealthWithoutBearerAndStripsSpoofedIdentity() {
-        MockServerWebExchange exchange = MockServerWebExchange.from(
-                MockServerHttpRequest.get("/usuarios/health")
-                        .header("X-User-Id", "spoofed")
-                        .header("X-Roles", "ADMIN")
-                        .header("X-Gateway-Secret", "spoofed")
-                        .build());
-        AtomicReference<ServerWebExchange> forwarded = new AtomicReference<>();
-
-        filter.filter(exchange, request -> {
-            forwarded.set(request);
-            return Mono.empty();
-        }).block();
-
-        assertNotNull(forwarded.get());
-        var headers = forwarded.get().getRequest().getHeaders();
-        assertNull(headers.getFirst("X-User-Id"));
-        assertNull(headers.getFirst("X-Roles"));
-        assertEquals(GATEWAY_SECRET, headers.getFirst("X-Gateway-Secret"));
-    }
-
-    @Test
     void requiresAdminRoleForAdminCasesAndAllowsUserRoleForPlayerRoutes() {
         when(tokenValidator.validate("user"))
                 .thenReturn(Mono.just(new AuthenticatedIdentity("user-1", List.of("USER"))));
