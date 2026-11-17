@@ -41,7 +41,7 @@ public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
         PathPatternParser parser = PathPatternParser.defaultInstance;
         this.publicPaths = Stream.of(
-                "/usuarios/swagger-ui/**", "/usuarios/swagger-ui.html", "/usuarios/v3/api-docs/**",
+                "/usuarios/health", "/usuarios/swagger-ui/**", "/usuarios/swagger-ui.html", "/usuarios/v3/api-docs/**",
                 "/casos/health", "/casos/docs/**", "/casos/docs-json",
                 "/partidas/health", "/partidas/docs/**", "/partidas/redoc", "/partidas/openapi.json")
                 .map(parser::parse).toList();

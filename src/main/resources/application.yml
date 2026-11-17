@@ -65,10 +65,8 @@ eureka:
   instance:
     hostname: ${EUREKA_INSTANCE_HOSTNAME:api-gateway}
     lease-renewal-interval-in-seconds: ${EUREKA_LEASE_RENEWAL_INTERVAL_SECONDS:30}
+    prefer-ip-address: false
   client:
     registry-fetch-interval-seconds: ${EUREKA_REGISTRY_FETCH_INTERVAL_SECONDS:30}
     service-url:
       defaultZone: ${EUREKA_SERVER_URL:http://localhost:8762/eureka/}
-  instance:
-    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
-    prefer-ip-address: false
